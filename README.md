@@ -55,10 +55,22 @@ docker run -e TELEGRAM_BOT_TOKEN=xxx --restart unless-stopped ali-translator
 
 The bot needs a host that stays online. Cheap/free options:
 
-- **Railway.app** — one-click deploy from GitHub
+- **Railway.app** — one-click deploy from GitHub (see below)
 - **Fly.io** — free tier with `fly launch`
 - **Oracle Cloud free tier VM** — always-free ARM VM, run with `systemd`
 - **A small Hetzner/DigitalOcean droplet** — €4/mo
+
+### 🚂 Deploy on Railway
+
+1. Go to https://railway.app → **New Project → Deploy from GitHub repo**
+2. Select `hasbunallah01/Ali-translator`
+3. Railway will detect the `Dockerfile` automatically. The included `railway.toml` pins the start command.
+4. In your service → **Variables**, add:
+   - `TELEGRAM_BOT_TOKEN` = your bot token from @BotFather
+5. **Settings → Networking → Generate Domain** (optional, not needed for a polling bot)
+6. Hit **Deploy**. Watch the logs — you should see `Ali Translator is starting…`
+
+Free tier gives you $5/month of usage, which is plenty for a low-traffic bot.
 
 ### Example: Oracle Cloud / generic Linux VM with systemd
 
