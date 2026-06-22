@@ -6,6 +6,8 @@ Supports translation between 100+ languages via Google Translator.
 
 import logging
 import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
 from typing import Optional, Tuple
 
 from deep_translator import GoogleTranslator, exceptions as dt_exceptions
@@ -19,6 +21,29 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+
+
+# ---------- Healthcheck HTTP server ----------
+# Railway (and similar platforms) probe a web endpoint after deploy to confirm
+# the container is alive. A pure Telegram bot never answers HTTP, so the probe
+# fails and the deploy rolls back. This tiny server answers 200 OK on every GET
+# so the platform thinks we're alive, while the bot keeps polling Telegram.
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler API)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"All-translator bot is alive")
+
+    def log_message(self, *_args, **_kwargs):  # silence default access log
+        return
+
+
+def _start_health_server() -> None:
+    port = int(os.environ.get("PORT", "8080"))
+    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+    Thread(target=server.serve_forever, name="health-http", daemon=True).start()
+    logger.info("Healthcheck HTTP server listening on 0.0.0.0:%s", port)
 
 # ---------- Config ----------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -187,6 +212,10 @@ async def on_text(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
+
+    # Start the healthcheck HTTP server BEFORE the bot so Railway can reach us
+    # as soon as the container is up. The bot's polling loop runs after this.
+    _start_health_server()
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
