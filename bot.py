@@ -7,9 +7,35 @@ Plus: English synonyms (/syn) and antonyms (/ant) via the free Dictionary API.
 import asyncio
 import logging
 import os
+import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 from typing import List, Optional, Tuple
+
+# Force unbuffered stdout/stderr so Railway logs stream live.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
+# Configure logging FIRST so health-server logs (which start very early) are captured.
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+    stream=sys.stdout,
+    force=True,
+)
+logger = logging.getLogger("ali-translator")
+
+# Startup banner — visible immediately in Railway logs.
+logger.info("=" * 60)
+logger.info("Ali Translator — bot.py loaded")
+logger.info("Python: %s", sys.version.split()[0])
+logger.info("PORT env (Railway-provided): %r", os.environ.get("PORT"))
+logger.info("HEALTHCHECK_PORT env: %r", os.environ.get("HEALTHCHECK_PORT"))
+logger.info("TELEGRAM_BOT_TOKEN present: %s", bool(os.environ.get("TELEGRAM_BOT_TOKEN")))
+logger.info("=" * 60)
 
 import requests
 from deep_translator import GoogleTranslator, exceptions as dt_exceptions
@@ -31,22 +57,43 @@ from telegram.ext import (
 # the container is alive. A pure Telegram bot never answers HTTP, so the probe
 # fails and the deploy rolls back. This tiny server answers 200 OK on every GET
 # so the platform thinks we're alive, while the bot keeps polling Telegram.
+#
+# We use HEALTHCHECK_PORT (default 8080) so there's zero chance of colliding
+# with PTB's `port` parameter, which is reserved for webhook mode.
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler API)
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"All-translator bot is alive")
+        self.wfile.write(b"Ali Translator bot is alive")
 
     def log_message(self, *_args, **_kwargs):  # silence default access log
         return
 
 
 def _start_health_server() -> None:
-    port = int(os.environ.get("PORT", "8080"))
-    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+    # Prefer HEALTHCHECK_PORT if set; otherwise bind to Railway's PORT (which
+    # is what the platform's healthcheck probe targets by default); otherwise
+    # fall back to 8080. Falling back to PORT is the correct behavior for
+    # Railway so the probe can actually reach us.
+    port_str = (
+        os.environ.get("HEALTHCHECK_PORT")
+        or os.environ.get("PORT")
+        or "8080"
+    )
+    try:
+        port = int(port_str)
+    except ValueError:
+        logger.error("Health port %r is not an int, falling back to 8080", port_str)
+        port = 8080
+    try:
+        server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+    except OSError as e:
+        logger.error("Failed to bind health server on port %s: %s", port, e)
+        return
     Thread(target=server.serve_forever, name="health-http", daemon=True).start()
     logger.info("Healthcheck HTTP server listening on 0.0.0.0:%s", port)
+
 
 # ---------- Config ----------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -81,12 +128,6 @@ WELCOME = (
     "/ant \\<word\\> — get English antonyms\n\n"
     "Tip: in `/to` and `/from`, language can be a code (`ar`, `en`, `fr`, …) or a full name (`arabic`, `french`)."
 )
-
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
-logger = logging.getLogger("ali-translator")
 
 
 # ---------- Helpers ----------
@@ -166,7 +207,6 @@ def _lookup_word_en(word: str) -> List[dict]:
             pos = meaning.get("partOfSpeech", "")
             syns = list(dict.fromkeys(meaning.get("synonyms", []) or []))
             ants = list(dict.fromkeys(meaning.get("antonyms", []) or []))
-            # Also collect from individual definitions
             for d in meaning.get("definitions", []):
                 for s in d.get("synonyms", []) or []:
                     if s not in syns:
@@ -196,7 +236,6 @@ async def cmd_langs(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     other_codes = sorted(c for c in code_map.keys() if c not in MAIN_LANGUAGES)
     other_lines = [f"• {flag_for(c)} `{c}` — {code_map[c]}" for c in other_codes]
 
-    # Telegram message limit is 4096 chars; chunk if needed.
     header = (
         f"{BOT_LOGO} *Supported languages* {BOT_LOGO}\n\n"
         f"*Main pair:*\n{main_block}\n\n"
@@ -265,9 +304,7 @@ async def cmd_from(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _render_word_relations(word: str, kind: str, update: Update) -> None:
-    """
-    kind: 'syn' or 'ant'
-    """
+    """kind: 'syn' or 'ant'"""
     word = (word or "").strip()
     if not word:
         await update.message.reply_text(
@@ -275,8 +312,6 @@ async def _render_word_relations(word: str, kind: str, update: Update) -> None:
         )
         return
 
-    # If the word isn't English, translate it to English first so the dictionary
-    # API can look it up.
     lookup_word = word
     translated_from = None
     try:
@@ -309,12 +344,12 @@ async def _render_word_relations(word: str, kind: str, update: Update) -> None:
         rels = m["synonyms"] if kind == "syn" else m["antonyms"]
         if not rels:
             continue
-        rels = rels[:25]  # cap per-PoS
+        rels = rels[:25]
         lines.append(f"*{pos}*")
         lines.append(", ".join(f"`{r}`" for r in rels))
         lines.append("")
 
-    if len(lines) <= 2:  # only the title + maybe translation note
+    if len(lines) <= 2:
         await update.message.reply_text(
             f"❗ No `{kind}` found for *{word}*.", parse_mode=ParseMode.MARKDOWN
         )
@@ -361,7 +396,6 @@ async def _register_bot_profile(app: Application) -> None:
     try:
         await app.bot.set_my_commands(commands)
         await app.bot.set_my_short_description(BOT_SHORT_DESCRIPTION)
-        # set_my_description has a 512-char limit; our description fits comfortably.
         await app.bot.set_my_description(BOT_DESCRIPTION)
         logger.info("Bot profile (commands, descriptions) registered.")
     except Exception as e:
