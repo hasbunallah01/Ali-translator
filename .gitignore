@@ -13,3 +13,5 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+# Bot profile assets (kept in repo, NOT gitignored — these are public assets)
+# (assets/ is intentionally tracked)

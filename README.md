@@ -31,7 +31,18 @@ cp .env.example .env
 # Edit .env and put your Telegram bot token from @BotFather
 ```
 
-### 3. Run
+### 3. (Optional) Set the bot's profile picture
+
+Telegram doesn't let bots change their own avatar via the Bot API — you have to do it in @BotFather. The repo includes the official avatar at `assets/bot-avatar.jpg` and `assets/bot-avatar.png`.
+
+1. Open Telegram → search for **@BotFather**
+2. Send `/setuserpic`
+3. Pick your bot
+4. Send the image file `assets/bot-avatar.jpg` (or `.png`)
+
+You'll see "Success! Userpic updated." — the new avatar appears in chats and search.
+
+### 4. Run
 
 ```bash
 python bot.py
