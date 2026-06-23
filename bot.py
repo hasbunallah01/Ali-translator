@@ -1,18 +1,21 @@
 """
-Ali Translator — a multilingual Telegram bot.
-Main languages: Arabic (ar) and English (en).
-Supports translation between 100+ languages via Google Translator.
+Ali Translator — a multilingual Telegram bot. 🔁
+Main pair: Arabic (ar) ⇄ English (en). Supports 100+ languages via Google Translator.
+Plus: English synonyms (/syn) and antonyms (/ant) via the free Dictionary API.
 """
 
+import asyncio
 import logging
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
+import requests
 from deep_translator import GoogleTranslator, exceptions as dt_exceptions
 from deep_translator.detection import single_detection
-from telegram import Update
+from flags import flag_for
+from telegram import BotCommand, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -47,18 +50,35 @@ def _start_health_server() -> None:
 
 # ---------- Config ----------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+BOT_LOGO = "🔁"
+BOT_SHORT_DESCRIPTION = "🔁 Multilingual translator (Arabic ⇄ English + 100 more) with synonyms & antonyms."
+BOT_DESCRIPTION = (
+    "🔁 Ali Translator — translate between 100+ languages, with Arabic ⇄ English "
+    "as the headline pair.\n\n"
+    "Commands:\n"
+    "• /start — welcome\n"
+    "• /langs — list all supported languages with flags\n"
+    "• /to <lang> <text> — translate into a specific language\n"
+    "• /from <lang> <text> — translate from a specific language\n"
+    "• /syn <word> — English synonyms\n"
+    "• /ant <word> — English antonyms\n\n"
+    "Just send any text to auto-translate it (Arabic ⇄ English by default)."
+)
+
 MAIN_LANGUAGES = {"ar": "Arabic", "en": "English"}
 WELCOME = (
-    "👋 *Welcome to Ali Translator!*\n\n"
+    f"{BOT_LOGO} *Welcome to Ali Translator!* {BOT_LOGO}\n\n"
     "I translate between *100+ languages*. My main pair is 🇸🇦 Arabic ⇄ 🇬🇧 English.\n\n"
     "Just send me any text and I'll auto-detect the language and translate it "
     "into the *other main language*.\n\n"
     "*Commands*\n"
     "/start — show this welcome\n"
     "/help — usage help\n"
-    "/langs — list supported languages\n"
+    "/langs — list supported languages with flags\n"
     "/to \\<lang\\> \\<text\\> — translate text into a specific language\n"
-    "/from \\<lang\\> \\<text\\> — translate text from a specific language\n\n"
+    "/from \\<lang\\> \\<text\\> — translate text from a specific language\n"
+    "/syn \\<word\\> — get English synonyms\n"
+    "/ant \\<word\\> — get English antonyms\n\n"
     "Tip: in `/to` and `/from`, language can be a code (`ar`, `en`, `fr`, …) or a full name (`arabic`, `french`)."
 )
 
@@ -75,11 +95,9 @@ def _resolve_lang(user_input: str) -> Optional[str]:
     if not user_input:
         return None
     key = user_input.strip().lower()
-    # Already a code?
     if key in GoogleTranslator().get_supported_languages(as_dict=True):
         return key
-    # Try matching against the full name list
-    code_map = GoogleTranslator().get_supported_languages(as_dict=True)  # {code: name}
+    code_map = GoogleTranslator().get_supported_languages(as_dict=True)
     for code, name in code_map.items():
         if name.lower() == key:
             return code
@@ -87,13 +105,11 @@ def _resolve_lang(user_input: str) -> Optional[str]:
 
 
 def _partner(code: str) -> str:
-    """Pick the 'other' main language for the auto-translate flow."""
     code = (code or "").lower()
     if code == "ar":
         return "en"
     if code == "en":
         return "ar"
-    # If neither main, default to English so user always gets a useful reply.
     return "en"
 
 
@@ -104,10 +120,6 @@ def _truncate(text: str, limit: int = 3800) -> str:
 
 
 async def _translate_text(text: str, target: str, source_hint: Optional[str] = None) -> Tuple[str, str]:
-    """
-    Translate `text` into `target`. Returns (translated_text, source_code).
-    Detects source via deep_translator's single_detection when not supplied.
-    """
     try:
         if source_hint and source_hint != "auto":
             detected = source_hint
@@ -129,6 +141,44 @@ async def _translate_text(text: str, target: str, source_hint: Optional[str] = N
         return f"❗ Translation failed: {e}", "unknown"
 
 
+def _lookup_word_en(word: str) -> List[dict]:
+    """
+    Look up an English word in the free dictionary API.
+    Returns a list of meaning dicts: [{"pos": "noun", "synonyms": [...], "antonyms": [...]}]
+    """
+    try:
+        r = requests.get(
+            f"https://api.dictionaryapi.dev/api/v2/entries/en/{word}",
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        if not isinstance(data, list):
+            return []
+    except Exception as e:
+        logger.warning("dictionary lookup failed: %s", e)
+        return []
+
+    out: List[dict] = []
+    for entry in data:
+        for meaning in entry.get("meanings", []):
+            pos = meaning.get("partOfSpeech", "")
+            syns = list(dict.fromkeys(meaning.get("synonyms", []) or []))
+            ants = list(dict.fromkeys(meaning.get("antonyms", []) or []))
+            # Also collect from individual definitions
+            for d in meaning.get("definitions", []):
+                for s in d.get("synonyms", []) or []:
+                    if s not in syns:
+                        syns.append(s)
+                for a in d.get("antonyms", []) or []:
+                    if a not in ants:
+                        ants.append(a)
+            if syns or ants:
+                out.append({"pos": pos, "synonyms": syns, "antonyms": ants})
+    return out
+
+
 # ---------- Handlers ----------
 async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(WELCOME, parse_mode=ParseMode.MARKDOWN)
@@ -140,15 +190,35 @@ async def cmd_help(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_langs(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     code_map = GoogleTranslator().get_supported_languages(as_dict=True)
-    main_block = "\n".join(f"• `{c}` — {n}" for c, n in MAIN_LANGUAGES.items())
-    other_codes = sorted(c for c in code_map.keys() if c not in MAIN_LANGUAGES)
-    msg = (
-        "*Supported languages*\n\n"
-        "*Main pair:*\n" + main_block + "\n\n"
-        f"_All {len(code_map)} languages are supported via Google Translator._\n"
-        "Send `/to <code> <text>` to pick a target explicitly."
+    main_block = "\n".join(
+        f"• {flag_for(c)} `{c}` — {n}" for c, n in MAIN_LANGUAGES.items()
     )
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+    other_codes = sorted(c for c in code_map.keys() if c not in MAIN_LANGUAGES)
+    other_lines = [f"• {flag_for(c)} `{c}` — {code_map[c]}" for c in other_codes]
+
+    # Telegram message limit is 4096 chars; chunk if needed.
+    header = (
+        f"{BOT_LOGO} *Supported languages* {BOT_LOGO}\n\n"
+        f"*Main pair:*\n{main_block}\n\n"
+        f"_All {len(code_map)} languages are supported via Google Translator._\n\n"
+    )
+    await update.message.reply_text(header, parse_mode=ParseMode.MARKDOWN)
+
+    chunk, size = [], 0
+    for line in other_lines:
+        size += len(line) + 1
+        chunk.append(line)
+        if size > 3000:
+            await update.message.reply_text("\n".join(chunk), parse_mode=ParseMode.MARKDOWN)
+            chunk, size = [], 0
+    if chunk:
+        await update.message.reply_text("\n".join(chunk), parse_mode=ParseMode.MARKDOWN)
+
+    await update.message.reply_text(
+        f"Send `/to <code> <text>` to translate into any of these. Example:\n"
+        f"`/to fr Hello world`",
+        parse_mode=ParseMode.MARKDOWN,
+    )
 
 
 async def cmd_to(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -164,7 +234,7 @@ async def cmd_to(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     text = " ".join(context.args[1:])
     translated, source = await _translate_text(text, target)
-    flag = f"`{source}` → `{target}`"
+    flag = f"`{source}` {flag_for(source)} → `{target}` {flag_for(target)}"
     await update.message.reply_text(f"{translated}\n\n{flag}", parse_mode=ParseMode.MARKDOWN)
 
 
@@ -189,16 +259,84 @@ async def cmd_from(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.exception("translate failed: %s", e)
         translated = f"❗ Translation failed: {e}"
     await update.message.reply_text(
-        f"{translated}\n\n`{source}` → `{target}`",
+        f"{translated}\n\n`{source}` {flag_for(source)} → `{target}` {flag_for(target)}",
         parse_mode=ParseMode.MARKDOWN,
     )
+
+
+async def _render_word_relations(word: str, kind: str, update: Update) -> None:
+    """
+    kind: 'syn' or 'ant'
+    """
+    word = (word or "").strip()
+    if not word:
+        await update.message.reply_text(
+            f"Usage: `/{kind} <word>`", parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    # If the word isn't English, translate it to English first so the dictionary
+    # API can look it up.
+    lookup_word = word
+    translated_from = None
+    try:
+        detected = single_detection(word, api="google")
+    except Exception:
+        detected = "auto"
+    if detected and detected not in ("en", "auto"):
+        try:
+            lookup_word = GoogleTranslator(source=detected, target="en").translate(word)
+            translated_from = detected
+        except Exception:
+            lookup_word = word
+
+    meanings = await asyncio.to_thread(_lookup_word_en, lookup_word)
+    if not meanings:
+        msg = f"❗ No `{kind}` found for *{word}*."
+        if translated_from:
+            msg += f"\n(I looked up the English form: *{lookup_word}*)"
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+        return
+
+    title_kind = "Synonyms" if kind == "syn" else "Antonyms"
+    lines = [f"📖 *{title_kind} for* _{word}_"]
+    if translated_from:
+        lines.append(f"_looked up in English as:_ *{lookup_word}*")
+    lines.append("")
+
+    for m in meanings:
+        pos = m["pos"] or "—"
+        rels = m["synonyms"] if kind == "syn" else m["antonyms"]
+        if not rels:
+            continue
+        rels = rels[:25]  # cap per-PoS
+        lines.append(f"*{pos}*")
+        lines.append(", ".join(f"`{r}`" for r in rels))
+        lines.append("")
+
+    if len(lines) <= 2:  # only the title + maybe translation note
+        await update.message.reply_text(
+            f"❗ No `{kind}` found for *{word}*.", parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    await update.message.reply_text(_truncate("\n".join(lines)), parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_syn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    word = " ".join(context.args) if context.args else ""
+    await _render_word_relations(word, "syn", update)
+
+
+async def cmd_ant(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    word = " ".join(context.args) if context.args else ""
+    await _render_word_relations(word, "ant", update)
 
 
 async def on_text(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     text = (update.message.text or "").strip()
     if not text:
         return
-    # Detect → flip between main languages (ar ⇄ en). If neither, fall back to en.
     try:
         source = single_detection(text, api="google") or "auto"
     except Exception:
@@ -206,6 +344,28 @@ async def on_text(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     target = _partner(source)
     translated, _src = await _translate_text(text, target, source_hint=source)
     await update.message.reply_text(_truncate(translated))
+
+
+# ---------- Bot branding ----------
+async def _register_bot_profile(app: Application) -> None:
+    """Set bot commands list, short description, and full description on startup."""
+    commands = [
+        BotCommand("start", "Show welcome message"),
+        BotCommand("help", "Show usage help"),
+        BotCommand("langs", "List all supported languages with flags"),
+        BotCommand("to", "Translate to a language: /to <lang> <text>"),
+        BotCommand("from", "Translate from a language: /from <lang> <text>"),
+        BotCommand("syn", "Get English synonyms: /syn <word>"),
+        BotCommand("ant", "Get English antonyms: /ant <word>"),
+    ]
+    try:
+        await app.bot.set_my_commands(commands)
+        await app.bot.set_my_short_description(BOT_SHORT_DESCRIPTION)
+        # set_my_description has a 512-char limit; our description fits comfortably.
+        await app.bot.set_my_description(BOT_DESCRIPTION)
+        logger.info("Bot profile (commands, descriptions) registered.")
+    except Exception as e:
+        logger.warning("Failed to register bot profile: %s", e)
 
 
 # ---------- Main ----------
@@ -223,7 +383,12 @@ def main() -> None:
     app.add_handler(CommandHandler("langs", cmd_langs))
     app.add_handler(CommandHandler("to", cmd_to))
     app.add_handler(CommandHandler("from", cmd_from))
+    app.add_handler(CommandHandler("syn", cmd_syn))
+    app.add_handler(CommandHandler("ant", cmd_ant))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+
+    # Register bot branding before polling starts.
+    app.post_init = _register_bot_profile
 
     logger.info("Ali Translator is starting…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

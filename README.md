@@ -7,7 +7,10 @@ A multilingual Telegram translation bot. Main pair: 🇸🇦 **Arabic** ⇄ 🇬
 - **Auto-detect** source language and flip between Arabic and English.
 - **`/to <lang> <text>`** — translate into any supported language.
 - **`/from <lang> <text>`** — translate *from* a specific language to its main partner.
-- **`/langs`** — list main languages and how to access the full set.
+- **`/langs`** — list **all** supported languages with country flags.
+- **`/syn <word>`** — get English **synonyms** (uses the free Dictionary API).
+- **`/ant <word>`** — get English **antonyms**.
+- 🔁 **Logo & branding** — bot short description, full description, and command list are registered on startup.
 - Lightweight: pure Python, single process, runs anywhere.
 
 ## 🚀 Setup
@@ -103,10 +106,14 @@ sudo journalctl -u ali-translator -f
 |---|---|
 | `/start` | Welcome message |
 | `/help` | Usage help |
-| `/langs` | Show supported main languages |
+| `/langs` | Show **all** supported languages with country flags |
 | `/to <lang> <text>` | Translate text into `<lang>` (code or name) |
 | `/from <lang> <text>` | Translate text *from* `<lang>` to its main partner |
+| `/syn <word>` | English **synonyms** of `<word>` |
+| `/ant <word>` | English **antonyms** of `<word>` |
 | *any text* | Auto-detect and flip Arabic ⇄ English (fallback: → English) |
+
+> `/syn` and `/ant` work best with English words. For non-English words, the bot will translate to English first and then look it up.
 
 ## 🔐 Security
 
